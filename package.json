@@ -1,0 +1,205 @@
+{
+  "name": "codepinion",
+  "displayName": "CodePinion",
+  "description": "Manage sprints, tasks, and workspaces, and chat with AI about your code — all without leaving the editor.",
+  "version": "0.0.1",
+  "publisher": "AlexMeta",
+  "icon": "media/codepinion-icon.png",
+  "engines": {
+    "vscode": "^1.117.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codepinion",
+          "title": "CodePinion",
+          "icon": "media/codepinion-activitybar.svg"
+        }
+      ]
+    },
+    "views": {
+      "codepinion": [
+        {
+          "id": "codepinion.repos",
+          "name": "Repos"
+        },
+        {
+          "id": "codepinion.workspace",
+          "name": "Workspace"
+        },
+        {
+          "id": "codepinion.planning",
+          "name": "Planning"
+        },
+        {
+          "id": "codepinion.ai",
+          "name": "AI"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "codepinion.login",
+        "title": "CodePinion: Login"
+      },
+      {
+        "command": "codepinion.logout",
+        "title": "CodePinion: Logout"
+      },
+      {
+        "command": "codepinion.setFrontendApiKey",
+        "title": "CodePinion: Set Frontend API Key"
+      },
+      {
+        "command": "codepinion.linkCurrentRepo",
+        "title": "CodePinion: Link Current Repo"
+      },
+      {
+        "command": "codepinion.startWorkspace",
+        "title": "CodePinion: Start Workspace"
+      },
+      {
+        "command": "codepinion.openWorkspaceTerminal",
+        "title": "CodePinion: Open Workspace Terminal"
+      },
+      {
+        "command": "codepinion.openCurrentTask",
+        "title": "CodePinion: Open Current Task"
+      },
+      {
+        "command": "codepinion.askAiAboutCurrentFile",
+        "title": "CodePinion: Ask AI About Current File"
+      },
+      {
+        "command": "codepinion.openDashboard",
+        "title": "CodePinion: Open Dashboard"
+      },
+      {
+        "command": "codepinion.openExternalUrl",
+        "title": "CodePinion: Open External URL"
+      },
+      {
+        "command": "codepinion.generateStandup",
+        "title": "CodePinion: Generate Daily Standup"
+      },
+      {
+        "command": "codepinion.sprintBreakdown",
+        "title": "CodePinion: AI Sprint Breakdown from PRD"
+      },
+      {
+        "command": "codepinion.generateCommitMessage",
+        "title": "CodePinion: Generate Commit Message"
+      },
+      {
+        "command": "codepinion.generatePrDescription",
+        "title": "CodePinion: Generate PR Description"
+      }
+    ],
+    "configuration": {
+      "title": "CodePinion",
+      "properties": {
+        "codepinion.backendUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8000",
+          "description": "Base URL for the CodePinion backend."
+        },
+        "codepinion.appUrl": {
+          "type": "string",
+          "default": "http://localhost:3000",
+          "description": "Base URL for the CodePinion web app."
+        }
+      }
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "codepinion.linkCurrentRepo",
+          "when": "view == codepinion.repos",
+          "group": "navigation"
+        },
+        {
+          "command": "codepinion.startWorkspace",
+          "when": "view == codepinion.workspace",
+          "group": "navigation"
+        },
+        {
+          "command": "codepinion.askAiAboutCurrentFile",
+          "when": "view == codepinion.ai",
+          "group": "navigation"
+        },
+        {
+          "command": "codepinion.generateCommitMessage",
+          "when": "view == codepinion.ai",
+          "group": "navigation@2"
+        },
+        {
+          "command": "codepinion.generatePrDescription",
+          "when": "view == codepinion.ai",
+          "group": "navigation@3"
+        },
+        {
+          "command": "codepinion.generateStandup",
+          "when": "view == codepinion.planning || view == codepinion.ai",
+          "group": "navigation@4"
+        },
+        {
+          "command": "codepinion.sprintBreakdown",
+          "when": "view == codepinion.planning || view == codepinion.ai",
+          "group": "navigation@5"
+        },
+        {
+          "command": "codepinion.setFrontendApiKey",
+          "when": "view == codepinion.repos || view == codepinion.workspace || view == codepinion.planning || view == codepinion.ai",
+          "group": "navigation@2"
+        },
+        {
+          "command": "codepinion.openDashboard",
+          "when": "view == codepinion.repos || view == codepinion.workspace || view == codepinion.planning || view == codepinion.ai",
+          "group": "navigation@1"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "codepinion.askAiAboutCurrentFile",
+        "key": "ctrl+alt+a",
+        "mac": "cmd+alt+a"
+      },
+      {
+        "command": "codepinion.generateCommitMessage",
+        "key": "ctrl+alt+m",
+        "mac": "cmd+alt+m"
+      },
+      {
+        "command": "codepinion.generateStandup",
+        "key": "ctrl+alt+s",
+        "mac": "cmd+alt+s"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src",
+    "test": "npm run test:unit",
+    "test:unit": "node --test out/test/**/*.js",
+    "test:integration": "vscode-test"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.117.0",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "22.x",
+    "typescript-eslint": "^8.56.1",
+    "eslint": "^9.39.3",
+    "typescript": "^5.9.3",
+    "@vscode/test-cli": "^0.0.12",
+    "@vscode/test-electron": "^2.5.2"
+  }
+}

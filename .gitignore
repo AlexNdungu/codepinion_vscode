@@ -1,0 +1,22 @@
+out
+dist
+node_modules
+.vscode-test/
+*.vsix
+
+# env / secrets
+.env
+.env.local
+*.pem
+
+# OS
+.DS_Store
+Thumbs.db
+
+# logs
+*.log
+npm-debug.log*
+
+# editor noise
+*.swp
+*.swo
