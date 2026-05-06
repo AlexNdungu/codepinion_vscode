@@ -56,12 +56,20 @@
         "title": "CodePinion: Logout"
       },
       {
-        "command": "codepinion.setFrontendApiKey",
-        "title": "CodePinion: Set Frontend API Key"
+        "command": "codepinion.setPersonalAccessToken",
+        "title": "CodePinion: Set Personal Access Token"
       },
       {
         "command": "codepinion.linkCurrentRepo",
         "title": "CodePinion: Link Current Repo"
+      },
+      {
+        "command": "codepinion.selectRepository",
+        "title": "CodePinion: Select Repository"
+      },
+      {
+        "command": "codepinion.searchRepositories",
+        "title": "CodePinion: Search Repositories"
       },
       {
         "command": "codepinion.startWorkspace",
@@ -109,12 +117,12 @@
       "properties": {
         "codepinion.backendUrl": {
           "type": "string",
-          "default": "http://127.0.0.1:8000",
+          "default": "https://api-uat.codepinion.co.ke",
           "description": "Base URL for the CodePinion backend."
         },
         "codepinion.appUrl": {
           "type": "string",
-          "default": "http://localhost:3000",
+          "default": "https://playground.codepinion.co.ke",
           "description": "Base URL for the CodePinion web app."
         }
       }
@@ -122,9 +130,19 @@
     "menus": {
       "view/title": [
         {
-          "command": "codepinion.linkCurrentRepo",
+          "command": "codepinion.selectRepository",
           "when": "view == codepinion.repos",
           "group": "navigation"
+        },
+        {
+          "command": "codepinion.searchRepositories",
+          "when": "view == codepinion.repos",
+          "group": "navigation@1"
+        },
+        {
+          "command": "codepinion.linkCurrentRepo",
+          "when": "view == codepinion.repos",
+          "group": "navigation@2"
         },
         {
           "command": "codepinion.startWorkspace",
@@ -157,14 +175,14 @@
           "group": "navigation@5"
         },
         {
-          "command": "codepinion.setFrontendApiKey",
+          "command": "codepinion.setPersonalAccessToken",
           "when": "view == codepinion.repos || view == codepinion.workspace || view == codepinion.planning || view == codepinion.ai",
-          "group": "navigation@2"
+          "group": "navigation@3"
         },
         {
           "command": "codepinion.openDashboard",
           "when": "view == codepinion.repos || view == codepinion.workspace || view == codepinion.planning || view == codepinion.ai",
-          "group": "navigation@1"
+          "group": "navigation@4"
         }
       ]
     },

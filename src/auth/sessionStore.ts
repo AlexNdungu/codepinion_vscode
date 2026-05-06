@@ -3,6 +3,7 @@ import * as vscode from "vscode";
 import type { CodePinionUser } from "../api/types";
 
 const SECRET_KEYS = {
+	personalAccessToken: "codepinion.personalAccessToken",
 	accessToken: "codepinion.accessToken",
 	refreshToken: "codepinion.refreshToken",
 	frontendApiKey: "codepinion.frontendApiKey",
@@ -10,13 +11,24 @@ const SECRET_KEYS = {
 
 const GLOBAL_KEYS = {
 	user: "codepinion.user",
+	authMode: "codepinion.authMode",
 } as const;
 
-export type SessionSecrets = {
+export type PersonalAccessTokenSessionSecrets = {
+	authMode: "personalAccessToken";
+	personalAccessToken: string;
+	authToken: string;
+};
+
+export type BrowserSessionSecrets = {
+	authMode: "browserSession";
 	accessToken: string;
 	refreshToken: string;
 	frontendApiKey: string;
+	authToken: string;
 };
+
+export type SessionSecrets = PersonalAccessTokenSessionSecrets | BrowserSessionSecrets;
 
 type StoredTokens = {
 	accessToken: string;
@@ -36,28 +48,71 @@ export class SessionStore {
 	) {}
 
 	async getSessionSecrets(): Promise<SessionSecrets | null> {
-		const [accessToken, refreshToken, frontendApiKey] = await Promise.all([
+		const authMode = this.globalState.get<string | null>(GLOBAL_KEYS.authMode, null);
+		const [personalAccessToken, accessToken, refreshToken, frontendApiKey] = await Promise.all([
+			this.secrets.get(SECRET_KEYS.personalAccessToken),
 			this.secrets.get(SECRET_KEYS.accessToken),
 			this.secrets.get(SECRET_KEYS.refreshToken),
 			this.secrets.get(SECRET_KEYS.frontendApiKey),
 		]);
 
-		if (!accessToken || !refreshToken || !frontendApiKey) {
-			return null;
+		if (authMode === "personalAccessToken" && personalAccessToken) {
+			return {
+				authMode: "personalAccessToken",
+				personalAccessToken,
+				authToken: personalAccessToken,
+			};
 		}
 
-		return {
-			accessToken,
-			refreshToken,
-			frontendApiKey,
-		};
+		if (authMode === "browserSession" && accessToken && refreshToken && frontendApiKey) {
+			return {
+				authMode: "browserSession",
+				accessToken,
+				refreshToken,
+				frontendApiKey,
+				authToken: accessToken,
+			};
+		}
+
+		if (personalAccessToken) {
+			await this.globalState.update(GLOBAL_KEYS.authMode, "personalAccessToken");
+			return {
+				authMode: "personalAccessToken",
+				personalAccessToken,
+				authToken: personalAccessToken,
+			};
+		}
+
+		if (accessToken && refreshToken && frontendApiKey) {
+			await this.globalState.update(GLOBAL_KEYS.authMode, "browserSession");
+			return {
+				authMode: "browserSession",
+				accessToken,
+				refreshToken,
+				frontendApiKey,
+				authToken: accessToken,
+			};
+		}
+		return null;
 	}
 
-	async storeTokens(value: StoredTokens): Promise<void> {
+	async storeBrowserSession(value: StoredTokens): Promise<void> {
 		await Promise.all([
+			this.globalState.update(GLOBAL_KEYS.authMode, "browserSession"),
 			this.secrets.store(SECRET_KEYS.accessToken, value.accessToken),
 			this.secrets.store(SECRET_KEYS.refreshToken, value.refreshToken),
 			this.globalState.update(GLOBAL_KEYS.user, value.user),
+		]);
+	}
+
+	async storePersonalAccessTokenSession(value: { personalAccessToken: string; user: CodePinionUser }): Promise<void> {
+		await Promise.all([
+			this.globalState.update(GLOBAL_KEYS.authMode, "personalAccessToken"),
+			this.secrets.store(SECRET_KEYS.personalAccessToken, value.personalAccessToken),
+			this.globalState.update(GLOBAL_KEYS.user, value.user),
+			this.secrets.delete(SECRET_KEYS.accessToken),
+			this.secrets.delete(SECRET_KEYS.refreshToken),
+			this.secrets.delete(SECRET_KEYS.frontendApiKey),
 		]);
 	}
 
@@ -86,18 +141,22 @@ export class SessionStore {
 
 	async clear(): Promise<void> {
 		await Promise.all([
+			this.secrets.delete(SECRET_KEYS.personalAccessToken),
 			this.secrets.delete(SECRET_KEYS.accessToken),
 			this.secrets.delete(SECRET_KEYS.refreshToken),
 			this.secrets.delete(SECRET_KEYS.frontendApiKey),
 			this.globalState.update(GLOBAL_KEYS.user, undefined),
+			this.globalState.update(GLOBAL_KEYS.authMode, undefined),
 		]);
 	}
 
 	async clearAuthSession(): Promise<void> {
 		await Promise.all([
+			this.secrets.delete(SECRET_KEYS.personalAccessToken),
 			this.secrets.delete(SECRET_KEYS.accessToken),
 			this.secrets.delete(SECRET_KEYS.refreshToken),
 			this.globalState.update(GLOBAL_KEYS.user, undefined),
+			this.globalState.update(GLOBAL_KEYS.authMode, undefined),
 		]);
 	}
 }

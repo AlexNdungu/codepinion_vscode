@@ -9,8 +9,8 @@ type TerminalDependencies = {
 	workspaceId: number;
 	workspaceLabel: string;
 	backendUrl: string;
-	accessToken: string;
-	frontendApiKey: string;
+	authToken: string;
+	frontendApiKey?: string;
 };
 
 export class CodePinionTerminal implements vscode.Pseudoterminal {
@@ -76,7 +76,7 @@ export class CodePinionTerminal implements vscode.Pseudoterminal {
 				this.deps.backendUrl,
 				this.deps.workspaceId,
 				this.session.id,
-				this.deps.accessToken,
+				this.deps.authToken,
 				this.deps.frontendApiKey,
 			),
 		);

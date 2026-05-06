@@ -22,6 +22,16 @@ export type RefreshResponse = {
 	refresh?: string;
 };
 
+export type ExtensionSessionResponse = {
+	user: CodePinionUser;
+	auth_strategy: "personal_access_token" | "browser_session";
+	api_token?: {
+		id: number;
+		name: string;
+		scopes: string[];
+	};
+};
+
 export type RepositoryRecord = {
 	id: number;
 	organization: number | null;
@@ -185,10 +195,46 @@ export type BranchRecord = {
 	last_synced_at: string | null;
 };
 
+export type GitStatusFile = {
+	path: string;
+	status: "modified" | "added" | "deleted" | "renamed" | "untracked";
+	staged: boolean;
+};
+
+export type GitStatusRecord = {
+	branch: string;
+	files: GitStatusFile[];
+};
+
+export type GitDiffRecord = {
+	diff: string;
+	path: string | null;
+};
+
+export type GitCommitResult = {
+	sha: string;
+	message: string;
+};
+
+export type CommentRecord = {
+	id: number;
+	author_name: string;
+	body: string;
+	created_at: string;
+};
+
+export type RepoPullRequest = {
+	id: number;
+	number: number;
+	title: string;
+	status: string;
+	source_branch: string;
+	web_url: string;
+};
+
 export type PaginatedResponse<T> = {
 	count: number;
 	next: string | null;
 	previous: string | null;
 	results: T[];
 };
-

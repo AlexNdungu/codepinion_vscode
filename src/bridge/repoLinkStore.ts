@@ -5,6 +5,8 @@ import type { LocalRepoContext } from "./git";
 import { buildRepoFingerprint } from "./git";
 
 const GLOBAL_KEY = "codepinion.repoLinks";
+const SELECTED_REPOSITORY_KEY = "codepinion.selectedRepositoryId";
+const REPOSITORY_WORKSPACES_KEY = "codepinion.repositoryWorkspaceIds";
 
 export type RepoLink = {
 	fingerprint: string;
@@ -23,6 +25,15 @@ export class RepoLinkStore {
 		return links[buildRepoFingerprint(localRepo)] ?? null;
 	}
 
+	getSelectedRepositoryId(): number | null {
+		return this.globalState.get<number>(SELECTED_REPOSITORY_KEY) ?? null;
+	}
+
+	getRepositoryWorkspaceId(repositoryId: number): number | null {
+		const workspaceIds = this.readRepositoryWorkspaceIds();
+		return workspaceIds[String(repositoryId)] ?? null;
+	}
+
 	async saveLink(localRepo: LocalRepoContext, repository: RepositoryRecord): Promise<RepoLink> {
 		const nextLink: RepoLink = {
 			fingerprint: buildRepoFingerprint(localRepo),
@@ -36,6 +47,14 @@ export class RepoLinkStore {
 		return nextLink;
 	}
 
+	async saveSelectedRepository(repository: RepositoryRecord): Promise<void> {
+		await this.globalState.update(SELECTED_REPOSITORY_KEY, repository.id);
+	}
+
+	async clearSelectedRepository(): Promise<void> {
+		await this.globalState.update(SELECTED_REPOSITORY_KEY, undefined);
+	}
+
 	async updateWorkspaceId(localRepo: LocalRepoContext, workspaceId: number): Promise<void> {
 		const existing = this.getLink(localRepo);
 		if (!existing) {
@@ -45,6 +64,12 @@ export class RepoLinkStore {
 			...existing,
 			workspaceId,
 		});
+	}
+
+	async updateRepositoryWorkspaceId(repositoryId: number, workspaceId: number): Promise<void> {
+		const workspaceIds = this.readRepositoryWorkspaceIds();
+		workspaceIds[String(repositoryId)] = workspaceId;
+		await this.globalState.update(REPOSITORY_WORKSPACES_KEY, workspaceIds);
 	}
 
 	async clearLink(localRepo: LocalRepoContext): Promise<void> {
@@ -62,5 +87,8 @@ export class RepoLinkStore {
 	private readLinks(): Record<string, RepoLink> {
 		return this.globalState.get<Record<string, RepoLink>>(GLOBAL_KEY, {});
 	}
-}
 
+	private readRepositoryWorkspaceIds(): Record<string, number> {
+		return this.globalState.get<Record<string, number>>(REPOSITORY_WORKSPACES_KEY, {});
+	}
+}

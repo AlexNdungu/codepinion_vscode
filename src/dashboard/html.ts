@@ -1,5 +1,6 @@
-import type { BranchRecord, CodePinionUser, EpicRecord, GoalRecord, RepositoryRecord, SprintRecord, TaskRecord, WorkspaceRecord } from "../api/types";
+import type { BranchRecord, CodePinionUser, CommentRecord, EpicRecord, GitStatusRecord, GoalRecord, RepositoryRecord, SprintRecord, TaskRecord, WorkspaceRecord } from "../api/types";
 import type { LocalRepoContext } from "../bridge/git";
+import { getRepositoryOwnerLabel } from "../repos/catalog";
 
 const TASK_STATUSES = ["backlog", "in_progress", "in_review", "done", "blocked"] as const;
 const SPRINT_STATUSES = ["planning", "active", "completed", "cancelled"] as const;
@@ -7,12 +8,13 @@ const PRIORITIES = ["critical", "high", "medium", "low"] as const;
 
 export type DashboardSnapshot = {
 	user: CodePinionUser | null;
-	hasFrontendApiKey: boolean;
+	hasPersonalAccessToken: boolean;
 	localRepo: LocalRepoContext | null;
 	repositories: RepositoryRecord[];
 	linkedRepository: RepositoryRecord | null;
 	workspace: WorkspaceRecord | null;
 	workspaceBranches: BranchRecord[];
+	workspaceGitStatus: GitStatusRecord | null;
 	planning: {
 		sprints: SprintRecord[];
 		epics: EpicRecord[];
@@ -20,6 +22,7 @@ export type DashboardSnapshot = {
 		currentTask: TaskRecord | null;
 		currentGoals: GoalRecord[];
 		currentSprint: SprintRecord | null;
+		currentTaskComments: CommentRecord[];
 	} | null;
 	chatHistory: Array<{ role: 'user' | 'assistant'; content: string }>;
 	generatedAiPrompt: string | null;
@@ -56,6 +59,33 @@ export function buildDashboardHtml(
 	const taskOptions = buildTaskOptions(snapshot.planning?.tasks ?? [], snapshot.planning?.currentTask?.id);
 	const epicOptions = buildEpicOptions(snapshot.planning?.epics ?? [], snapshot.planning?.currentSprint?.id);
 	const currentGoalCount = snapshot.planning?.currentGoals.length ?? 0;
+	const currentTaskCommentCount = snapshot.planning?.currentTaskComments.length ?? 0;
+
+	const taskCommentsMarkup = snapshot.planning?.currentTaskComments.length
+		? snapshot.planning.currentTaskComments.map((c) => `
+			<div class="comment-item">
+				<span class="comment-author">${escapeHtml(c.author_name)}</span>
+				<span class="meta-text">${escapeHtml(formatRelativeTime(c.created_at))}</span>
+				<p class="comment-body">${escapeHtml(c.body)}</p>
+			</div>
+		`).join("")
+		: `<p class="empty-text" style="padding:8px 12px;">No comments yet.</p>`;
+
+	const gitStatusMarkup = snapshot.workspaceGitStatus
+		? snapshot.workspaceGitStatus.files.length
+			? snapshot.workspaceGitStatus.files.map((f) => `
+				<li>
+					<div class="item-title">
+						<span class="mono">${escapeHtml(f.path)}</span>
+					</div>
+					<div class="item-meta">
+						${statusChip(f.staged ? "active" : "backlog")}
+						<span class="meta-text">${escapeHtml(f.status)}</span>
+					</div>
+				</li>
+			`).join("")
+			: `<li class="empty-li">Working tree is clean.</li>`
+		: `<li class="empty-li">No active workspace.</li>`;
 
 	const epicsMarkup = snapshot.planning?.epics.length
 		? snapshot.planning.epics.map((epic) => `
@@ -70,6 +100,7 @@ export function buildDashboardHtml(
 						${buildOptions(["active", "completed", "cancelled"], epic.status)}
 					</select>
 					<button class="btn-secondary sm" data-command="codepinion.dashboard.updateEpicStatus" data-epic-id="${epic.id}">Save</button>
+					<button class="btn-ghost sm" data-command="codepinion.dashboard.deleteEpic" data-epic-id="${epic.id}" title="Delete epic">✕</button>
 				</div>
 			</li>
 		`).join("")
@@ -94,6 +125,7 @@ export function buildDashboardHtml(
 					${buildOptions(SPRINT_STATUSES, snapshot.planning.currentSprint.status)}
 				</select>
 				<button class="btn-secondary sm" data-command="codepinion.dashboard.updateSprintStatus" data-sprint-id="${snapshot.planning.currentSprint.id}">Save</button>
+				<button class="btn-ghost sm" data-command="codepinion.dashboard.deleteSprint" data-sprint-id="${snapshot.planning.currentSprint.id}" title="Delete sprint">✕</button>
 			</div>
 		`
 		: `<p class="empty-text">No active sprint to edit yet.</p>`;
@@ -122,22 +154,40 @@ export function buildDashboardHtml(
 						${buildOptions(TASK_STATUSES, goal.status)}
 					</select>
 					<button class="btn-secondary sm" data-command="codepinion.dashboard.updateGoalStatus" data-goal-id="${goal.id}">Save</button>
+					<button class="btn-ghost sm" data-toggle="goal-comments-${goal.id}">💬</button>
+					<button class="btn-ghost sm" data-command="codepinion.dashboard.deleteGoal" data-goal-id="${goal.id}" title="Delete goal">✕</button>
+				</div>
+				<div id="goal-comments-${goal.id}" class="create-form-wrap" style="display:none;">
+					<form class="form-body" data-command="codepinion.dashboard.postGoalComment" data-goal-id="${goal.id}">
+						<label>Comment <textarea name="body" rows="2" required placeholder="Add a comment…"></textarea></label>
+						<div><button type="submit" class="btn-primary sm">Post</button></div>
+					</form>
 				</div>
 			</li>
 		`).join("")
 		: `<li class="empty-li">No goals linked to the current task.</li>`;
 
 	const repoMarkup = snapshot.repositories.length
-		? snapshot.repositories.slice(0, 10).map((repository) => `
-			<li>
+		? snapshot.repositories.map((repository) => `
+			<li class="repo-item" data-repo-search="${escapeHtml([
+				repository.full_name,
+				repository.name,
+				repository.slug,
+				repository.description,
+				repository.organization_name,
+				repository.owner_name,
+				repository.owner_slug,
+				repository.language,
+				repository.status,
+			].filter(Boolean).join(" ").toLowerCase())}">
 				<div class="item-title">${escapeHtml(repository.full_name)}</div>
 				<div class="item-meta">
-					<span class="meta-text">${escapeHtml(repository.description || repository.language || repository.status)}</span>
+					<span class="meta-text">${escapeHtml(getRepositoryOwnerLabel(repository))} • ${escapeHtml(repository.description || repository.language || repository.status)}</span>
 					${snapshot.linkedRepository?.id === repository.id ? statusChip("active") : ""}
 				</div>
 				<div class="item-actions">
 					<button class="sm ${snapshot.linkedRepository?.id === repository.id ? "btn-primary" : "btn-secondary"}" data-command="codepinion.linkRepository" data-repository-id="${repository.id}">
-						${snapshot.linkedRepository?.id === repository.id ? "Linked" : "Link"}
+						${snapshot.linkedRepository?.id === repository.id ? "Selected" : "Select"}
 					</button>
 				</div>
 			</li>
@@ -180,6 +230,15 @@ export function buildDashboardHtml(
 					<button class="btn-secondary sm" data-command="codepinion.dashboard.updateTaskStatus" data-task-id="${task.id}">Save</button>
 					${canCreateBranch ? `<button class="btn-secondary sm" data-command="codepinion.dashboard.startTaskWork" data-task-id="${task.id}">Start Work</button>` : ""}
 					<button class="btn-ghost sm" data-command="codepinion.openTaskById" data-task-id="${task.id}">Open ↗</button>
+					<button class="btn-ghost sm" data-command="codepinion.dashboard.linkPrToTask" data-task-id="${task.id}">+ PR</button>
+					<button class="btn-ghost sm" data-toggle="task-comments-${task.id}">💬</button>
+					<button class="btn-ghost sm" data-command="codepinion.dashboard.deleteTask" data-task-id="${task.id}" title="Delete task">✕</button>
+				</div>
+				<div id="task-comments-${task.id}" class="create-form-wrap" style="display:none;">
+					<form class="form-body" data-command="codepinion.dashboard.postTaskComment" data-task-id="${task.id}">
+						<label>Comment <textarea name="body" rows="2" required placeholder="Add a comment…"></textarea></label>
+						<div><button type="submit" class="btn-primary sm">Post</button></div>
+					</form>
 				</div>
 			</li>
 		`).join("")
@@ -613,6 +672,18 @@ export function buildDashboardHtml(
 			border-top: 1px solid var(--border);
 			background: color-mix(in srgb, var(--panel) 50%, transparent);
 		}
+
+		/* ── Comments ─────────────────────────────────────── */
+		.comment-list { border-top: 1px solid var(--border); }
+		.comment-item {
+			padding: 8px 12px;
+			border-bottom: 1px solid var(--border);
+			display: grid;
+			gap: 3px;
+		}
+		.comment-item:last-child { border-bottom: none; }
+		.comment-author { font-size: 11px; font-weight: 600; }
+		.comment-body { margin: 0; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
 	</style>
 </head>
 <body>
@@ -633,10 +704,10 @@ export function buildDashboardHtml(
 	<div class="page">
 		${snapshot.errorMessage ? `<div class="banner">${escapeHtml(snapshot.errorMessage)}</div>` : ""}
 
-		${!snapshot.hasFrontendApiKey ? `
+		${!snapshot.user && !snapshot.hasPersonalAccessToken ? `
 		<div class="banner-warn">
-			<span>⚠ No API key configured — AI features require a frontend API key.</span>
-			<button class="btn-secondary sm" data-command="codepinion.setFrontendApiKey">Set API Key</button>
+			<span>⚠ No personal access token configured for this VS Code profile.</span>
+			<button class="btn-secondary sm" data-command="codepinion.setPersonalAccessToken">Set Token</button>
 		</div>` : ""}
 
 		<div class="context-bar">
@@ -663,13 +734,75 @@ export function buildDashboardHtml(
 		</div>
 
 		<div class="tab-bar">
-			<button class="tab-btn active" data-tab="planning">Planning</button>
+			<button class="tab-btn active" data-tab="repos">Repos</button>
+			<button class="tab-btn" data-tab="planning">Planning</button>
 			<button class="tab-btn" data-tab="ai">AI Chat</button>
-			<button class="tab-btn" data-tab="repos">Repos</button>
+		</div>
+
+		<!-- Repos tab -->
+		<div class="tab-panel" id="tab-repos">
+			<div class="section">
+				<div class="section-header">
+					<span class="eyebrow">Repositories</span>
+					<div class="inline-actions">
+						<span class="meta-text">${snapshot.repositories.length} accessible</span>
+						<button class="btn-ghost sm" data-command="codepinion.selectRepository">Search & Select</button>
+						<button class="btn-ghost sm" data-command="codepinion.linkCurrentRepo">Link Local Repo</button>
+					</div>
+				</div>
+				<div class="section-body" style="padding-top:0;">
+					<label>
+						<input id="repo-search-input" type="search" placeholder="Search repositories by name, owner, language, or status" />
+					</label>
+				</div>
+				<div class="list-wrap">
+					<ul id="repo-list">${repoMarkup}</ul>
+				</div>
+			</div>
+
+			<div class="section">
+				<div class="section-header">
+					<span class="eyebrow">Workspace</span>
+				</div>
+				<div class="section-body">
+					<div class="inline-actions">
+						<button class="btn-secondary sm" data-command="codepinion.startWorkspace">Start or Resume</button>
+						${(snapshot.workspace?.capabilities.can_run_terminal ?? true) ? `<button class="btn-ghost sm" data-command="codepinion.openWorkspaceTerminal">Open Terminal</button>` : ""}
+					</div>
+					<p class="empty-text">${escapeHtml(workspaceLabel)}</p>
+					${snapshot.workspace?.last_opened_file_path ? `<p class="empty-text" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(snapshot.workspace.last_opened_file_path)}">Last file: <span class="mono">${escapeHtml(snapshot.workspace.last_opened_file_path)}</span></p>` : ""}
+				</div>
+				${branchPickerMarkup}
+			</div>
+
+			${snapshot.workspace ? `
+			<div class="section">
+				<div class="section-header">
+					<span class="eyebrow">Git</span>
+					<div class="inline-actions">
+						<span class="meta-text">${escapeHtml(snapshot.workspaceGitStatus?.branch ?? snapshot.workspace.branch_name)}</span>
+						<button class="btn-ghost sm" data-command="codepinion.dashboard.workspaceCheckout">Checkout</button>
+						<button class="btn-ghost sm" data-command="codepinion.dashboard.workspaceCreateBranch">+ Branch</button>
+					</div>
+				</div>
+				<div class="list-wrap">
+					<ul>${gitStatusMarkup}</ul>
+				</div>
+				<div class="section-header">
+					<span class="eyebrow">Commit</span>
+					<button class="btn-ghost sm" data-toggle="workspace-commit-form">+ Commit</button>
+				</div>
+				<div id="workspace-commit-form" class="create-form-wrap" style="display:none;">
+					<form class="form-body" data-command="codepinion.dashboard.workspaceCommit">
+						<label>Message <textarea name="message" rows="3" required placeholder="Describe your changes…">${escapeHtml(snapshot.generatedAiPrompt ?? "")}</textarea></label>
+						<div><button type="submit" class="btn-primary">Commit</button></div>
+					</form>
+				</div>
+			</div>` : ""}
 		</div>
 
 		<!-- Planning tab -->
-		<div class="tab-panel" id="tab-planning">
+		<div class="tab-panel" id="tab-planning" style="display:none;">
 			<div class="section">
 				<div class="section-header">
 					<span class="eyebrow">Planning</span>
@@ -737,6 +870,21 @@ export function buildDashboardHtml(
 				<div class="list-wrap">
 					<ul>${goalsMarkup}</ul>
 				</div>
+
+				<div class="section-header">
+					<span class="eyebrow">Task Comments</span>
+					<div class="inline-actions">
+						<span class="meta-text">${currentTaskCommentCount}</span>
+						<button class="btn-ghost sm" data-toggle="task-comments-panel">+ Comment</button>
+					</div>
+				</div>
+				<div id="task-comments-panel" class="create-form-wrap" style="display:none;">
+					<form class="form-body" data-command="codepinion.dashboard.postTaskComment" data-task-id="${snapshot.planning?.currentTask?.id ?? 0}">
+						<label>Comment <textarea name="body" rows="2" required placeholder="Add a comment on the current task…"></textarea></label>
+						<div><button type="submit" class="btn-primary sm">Post</button></div>
+					</form>
+				</div>
+				${currentTaskCommentCount > 0 ? `<div class="comment-list">${taskCommentsMarkup}</div>` : ""}
 
 				<div class="section-header">
 					<span class="eyebrow">Epics</span>
@@ -809,36 +957,6 @@ export function buildDashboardHtml(
 			</div>
 		</div>
 
-		<!-- Repos tab -->
-		<div class="tab-panel" id="tab-repos" style="display:none;">
-			<div class="section">
-				<div class="section-header">
-					<span class="eyebrow">Repositories</span>
-					<div class="inline-actions">
-						<span class="meta-text">${snapshot.repositories.length} accessible</span>
-						<button class="btn-ghost sm" data-command="codepinion.linkCurrentRepo">Link Repo</button>
-					</div>
-				</div>
-				<div class="list-wrap">
-					<ul>${repoMarkup}</ul>
-				</div>
-			</div>
-
-			<div class="section">
-				<div class="section-header">
-					<span class="eyebrow">Workspace</span>
-				</div>
-				<div class="section-body">
-					<div class="inline-actions">
-						<button class="btn-secondary sm" data-command="codepinion.startWorkspace">Start or Resume</button>
-						${(snapshot.workspace?.capabilities.can_run_terminal ?? true) ? `<button class="btn-ghost sm" data-command="codepinion.openWorkspaceTerminal">Open Terminal</button>` : ""}
-					</div>
-					<p class="empty-text">${escapeHtml(workspaceLabel)}</p>
-					${snapshot.workspace?.last_opened_file_path ? `<p class="empty-text" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(snapshot.workspace.last_opened_file_path)}">Last file: <span class="mono">${escapeHtml(snapshot.workspace.last_opened_file_path)}</span></p>` : ""}
-				</div>
-				${branchPickerMarkup}
-			</div>
-		</div>
 	</div>
 
 	<script nonce="${nonce}">
@@ -889,6 +1007,26 @@ export function buildDashboardHtml(
 					postAction(command, { epicId: epicId, payload: { status: sel ? sel.value : "" } });
 					return;
 				}
+				if (command === "codepinion.dashboard.deleteTask") {
+					postAction(command, { taskId: Number(el.getAttribute("data-task-id")) });
+					return;
+				}
+				if (command === "codepinion.dashboard.deleteGoal") {
+					postAction(command, { goalId: Number(el.getAttribute("data-goal-id")) });
+					return;
+				}
+				if (command === "codepinion.dashboard.deleteEpic") {
+					postAction(command, { epicId: Number(el.getAttribute("data-epic-id")) });
+					return;
+				}
+				if (command === "codepinion.dashboard.deleteSprint") {
+					postAction(command, { sprintId: Number(el.getAttribute("data-sprint-id")) });
+					return;
+				}
+				if (command === "codepinion.dashboard.linkPrToTask") {
+					postAction(command, { taskId: Number(el.getAttribute("data-task-id")) });
+					return;
+				}
 
 				postAction(command, {
 					repositoryId: el.hasAttribute("data-repository-id") ? Number(el.getAttribute("data-repository-id")) : undefined,
@@ -900,7 +1038,13 @@ export function buildDashboardHtml(
 			form.addEventListener("submit", function(event) {
 				event.preventDefault();
 				var command = form.getAttribute("data-command");
-				if (command) { postAction(command, { payload: collectFormPayload(form) }); }
+				if (!command) { return; }
+				var extra = { payload: collectFormPayload(form) };
+				var rawTaskId = form.getAttribute("data-task-id");
+				var rawGoalId = form.getAttribute("data-goal-id");
+				if (rawTaskId) { extra.taskId = Number(rawTaskId); }
+				if (rawGoalId) { extra.goalId = Number(rawGoalId); }
+				postAction(command, extra);
 			});
 		});
 
@@ -965,6 +1109,17 @@ export function buildDashboardHtml(
 			});
 		});
 
+		var repoSearchInput = document.getElementById("repo-search-input");
+		if (repoSearchInput) {
+			repoSearchInput.addEventListener("input", function() {
+				var query = String(repoSearchInput.value || "").trim().toLowerCase();
+				document.querySelectorAll(".repo-item").forEach(function(item) {
+					var haystack = String(item.getAttribute("data-repo-search") || "");
+					item.style.display = !query || haystack.includes(query) ? "" : "none";
+				});
+			});
+		}
+
 		// Inline create form toggles
 		document.querySelectorAll("[data-toggle]").forEach(function(btn) {
 			btn.addEventListener("click", function() {
@@ -980,6 +1135,16 @@ export function buildDashboardHtml(
 
 function statusChip(value: string): string {
 	return `<span class="chip" data-s="${escapeHtml(value)}">${escapeHtml(labelize(value))}</span>`;
+}
+
+function formatRelativeTime(isoString: string): string {
+	const diffMs = Date.now() - new Date(isoString).getTime();
+	const diffMin = Math.floor(diffMs / 60000);
+	if (diffMin < 1) { return "just now"; }
+	if (diffMin < 60) { return `${diffMin}m ago`; }
+	const diffHr = Math.floor(diffMin / 60);
+	if (diffHr < 24) { return `${diffHr}h ago`; }
+	return `${Math.floor(diffHr / 24)}d ago`;
 }
 
 function truncate(value: string, maxLength: number): string {

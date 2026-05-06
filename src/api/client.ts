@@ -1,12 +1,16 @@
 import type {
 	BranchRecord,
-	CodePinionTokens,
 	CodePinionUser,
+	CommentRecord,
 	EpicRecord,
+	ExtensionSessionResponse,
+	GitCommitResult,
+	GitDiffRecord,
+	GitStatusRecord,
 	GoalRecord,
-	LoginResponse,
 	PaginatedResponse,
 	RefreshResponse,
+	RepoPullRequest,
 	RepositoryRecord,
 	SprintRecord,
 	TaskRecord,
@@ -88,6 +92,7 @@ type RequestOptions = {
 	body?: unknown;
 	auth?: boolean;
 	retryOnAuthFailure?: boolean;
+	authToken?: string;
 	frontendApiKey?: string;
 };
 
@@ -100,19 +105,15 @@ export class CodePinionClient {
 		private readonly fetchFn: FetchFn = fetch,
 	) {}
 
-	async login(email: string, password: string, frontendApiKey: string): Promise<CodePinionUser> {
-		const response = await this.rawRequest<LoginResponse>("/api/auth/login/", {
-			method: "POST",
-			body: { email, password },
+	async authenticateWithPersonalAccessToken(personalAccessToken: string): Promise<CodePinionUser> {
+		const response = await this.rawRequest<ExtensionSessionResponse>("/api/auth/extension/session/", {
 			auth: false,
-			frontendApiKey,
+			authToken: personalAccessToken,
 			retryOnAuthFailure: false,
 		});
 
-		await this.sessionStore.storeFrontendApiKey(frontendApiKey);
-		await this.sessionStore.storeTokens({
-			accessToken: response.access,
-			refreshToken: response.refresh,
+		await this.sessionStore.storePersonalAccessTokenSession({
+			personalAccessToken,
 			user: response.user,
 		});
 		return response.user;
@@ -120,7 +121,7 @@ export class CodePinionClient {
 
 	async logout(): Promise<void> {
 		const session = await this.sessionStore.getSessionSecrets();
-		if (session?.refreshToken) {
+		if (session?.authMode === "browserSession" && session.refreshToken) {
 			try {
 				await this.rawRequest("/api/auth/logout/", {
 					method: "POST",
@@ -136,11 +137,11 @@ export class CodePinionClient {
 	}
 
 	async getCurrentUser(): Promise<CodePinionUser> {
-		const user = await this.rawRequest<CodePinionUser>("/api/auth/me/", {
+		const session = await this.rawRequest<ExtensionSessionResponse>("/api/auth/extension/session/", {
 			auth: true,
 		});
-		await this.sessionStore.storeUser(user);
-		return user;
+		await this.sessionStore.storeUser(session.user);
+		return session.user;
 	}
 
 	async listRepositories(): Promise<RepositoryRecord[]> {
@@ -273,6 +274,98 @@ export class CodePinionClient {
 		});
 	}
 
+	async deleteSprint(sprintId: number): Promise<void> {
+		await this.rawRequest<void>(`/api/planning/sprints/${sprintId}/`, { method: "DELETE", auth: true });
+	}
+
+	async deleteTask(taskId: number): Promise<void> {
+		await this.rawRequest<void>(`/api/planning/tasks/${taskId}/`, { method: "DELETE", auth: true });
+	}
+
+	async deleteGoal(goalId: number): Promise<void> {
+		await this.rawRequest<void>(`/api/planning/goals/${goalId}/`, { method: "DELETE", auth: true });
+	}
+
+	async deleteEpic(epicId: number): Promise<void> {
+		await this.rawRequest<void>(`/api/planning/epics/${epicId}/`, { method: "DELETE", auth: true });
+	}
+
+	async getWorkspaceGitStatus(workspaceId: number): Promise<GitStatusRecord> {
+		return this.rawRequest<GitStatusRecord>(`/api/workspaces/${workspaceId}/git/status/`, { auth: true });
+	}
+
+	async getWorkspaceGitDiff(workspaceId: number, path?: string): Promise<GitDiffRecord> {
+		const qs = path ? `?path=${encodeURIComponent(path)}` : "";
+		return this.rawRequest<GitDiffRecord>(`/api/workspaces/${workspaceId}/git/diff/${qs}`, { auth: true });
+	}
+
+	async workspaceGitCommit(workspaceId: number, message: string): Promise<GitCommitResult> {
+		return this.rawRequest<GitCommitResult>(`/api/workspaces/${workspaceId}/git/commit/`, {
+			method: "POST",
+			body: { message },
+			auth: true,
+		});
+	}
+
+	async workspaceGitCheckout(workspaceId: number, branch: string): Promise<void> {
+		await this.rawRequest<void>(`/api/workspaces/${workspaceId}/git/checkout/`, {
+			method: "POST",
+			body: { branch },
+			auth: true,
+		});
+	}
+
+	async workspaceGitCreateBranch(workspaceId: number, name: string, from?: string): Promise<void> {
+		await this.rawRequest<void>(`/api/workspaces/${workspaceId}/git/branches/create/`, {
+			method: "POST",
+			body: from ? { name, from } : { name },
+			auth: true,
+		});
+	}
+
+	async listTaskComments(taskId: number): Promise<CommentRecord[]> {
+		return this.rawListRequest<CommentRecord>(`/api/planning/tasks/${taskId}/comments/`);
+	}
+
+	async createTaskComment(taskId: number, body: string): Promise<CommentRecord> {
+		return this.rawRequest<CommentRecord>(`/api/planning/tasks/${taskId}/comments/`, {
+			method: "POST",
+			body: { body },
+			auth: true,
+		});
+	}
+
+	async listGoalComments(goalId: number): Promise<CommentRecord[]> {
+		return this.rawListRequest<CommentRecord>(`/api/planning/goals/${goalId}/comments/`);
+	}
+
+	async createGoalComment(goalId: number, body: string): Promise<CommentRecord> {
+		return this.rawRequest<CommentRecord>(`/api/planning/goals/${goalId}/comments/`, {
+			method: "POST",
+			body: { body },
+			auth: true,
+		});
+	}
+
+	async listRepoPullRequests(repositoryId: number): Promise<RepoPullRequest[]> {
+		return this.rawListRequest<RepoPullRequest>(`/api/gitdata/pull-requests/?repository=${repositoryId}`);
+	}
+
+	async linkPrToTask(taskId: number, prId: number): Promise<void> {
+		await this.rawRequest<void>(`/api/planning/tasks/${taskId}/pull-requests/`, {
+			method: "POST",
+			body: { pull_request_id: prId },
+			auth: true,
+		});
+	}
+
+	async unlinkPrFromTask(taskId: number, prId: number): Promise<void> {
+		await this.rawRequest<void>(`/api/planning/tasks/${taskId}/pull-requests/${prId}/`, {
+			method: "DELETE",
+			auth: true,
+		});
+	}
+
 	async listWorkspaceBranches(workspaceId: number): Promise<BranchRecord[]> {
 		const response = await this.rawRequest<{ branches: BranchRecord[] }>(
 			`/api/workspaces/${workspaceId}/git/branches/`,
@@ -283,7 +376,7 @@ export class CodePinionClient {
 
 	async ensureSession(): Promise<SessionSecrets> {
 		const session = await this.sessionStore.getSessionSecrets();
-		if (!session?.accessToken || !session.frontendApiKey) {
+		if (!session?.authToken) {
 			throw new Error("Sign in to CodePinion first.");
 		}
 		return session;
@@ -300,7 +393,8 @@ export class CodePinionClient {
 		const auth = options.auth ?? false;
 		const retryOnAuthFailure = options.retryOnAuthFailure ?? true;
 		const session = auth ? await this.sessionStore.getSessionSecrets() : null;
-		const frontendApiKey = options.frontendApiKey ?? session?.frontendApiKey ?? "";
+		const frontendApiKey = options.frontendApiKey ?? (session?.authMode === "browserSession" ? session.frontendApiKey : "");
+		const authToken = options.authToken ?? (auth ? session?.authToken ?? "" : "");
 		const headers = new Headers({
 			Accept: "application/json",
 		});
@@ -311,8 +405,8 @@ export class CodePinionClient {
 		if (frontendApiKey) {
 			headers.set("X-API-Key", frontendApiKey);
 		}
-		if (auth && session?.accessToken) {
-			headers.set("Authorization", `Bearer ${session.accessToken}`);
+		if (authToken) {
+			headers.set("Authorization", `Bearer ${authToken}`);
 		}
 
 		const response = await this.fetchFn(buildApiUrl(this.getBackendUrl(), path), {
@@ -328,7 +422,8 @@ export class CodePinionClient {
 			response.status === 401 &&
 			auth &&
 			retryOnAuthFailure &&
-			session?.refreshToken &&
+			session?.authMode === "browserSession" &&
+			session.refreshToken &&
 			path !== "/api/auth/token/refresh/"
 		) {
 			const refreshed = await this.refreshAccessToken(session);
@@ -348,6 +443,10 @@ export class CodePinionClient {
 	}
 
 	private async refreshAccessToken(session: SessionSecrets): Promise<boolean> {
+		if (session.authMode !== "browserSession") {
+			await this.sessionStore.clearAuthSession();
+			return false;
+		}
 		const response = await this.rawRequest<RefreshResponse>("/api/auth/token/refresh/", {
 			method: "POST",
 			body: { refresh: session.refreshToken },

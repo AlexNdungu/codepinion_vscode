@@ -143,10 +143,10 @@ All commands are available via the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `codepinion.backendUrl` | `http://127.0.0.1:8000` | URL of your CodePinion backend |
-| `codepinion.appUrl` | `http://localhost:3000` | URL of the CodePinion web app |
+| `codepinion.backendUrl` | `https://api-uat.codepinion.co.ke` | URL of your CodePinion backend |
+| `codepinion.appUrl` | `https://playground.codepinion.co.ke` | URL of the CodePinion web app |
 
-These only need to be changed if you are running CodePinion on non-default ports or a remote server.
+These only need to be changed if you want the extension to target a different environment such as local development or production.
 
 ---
 

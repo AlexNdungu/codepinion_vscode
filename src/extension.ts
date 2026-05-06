@@ -4,12 +4,13 @@ import { buildAiPrompt } from "./ai/promptBuilder";
 import { FrontendAiClient } from "./ai/frontendAiClient";
 import { getLocalBranchDiff, getStagedDiff } from "./ai/gitHelpers";
 import { CodePinionApiError, CodePinionClient } from "./api/client";
-import type { BranchRecord, CodePinionUser, EpicRecord, GoalRecord, RepositoryRecord, SprintRecord, TaskRecord, WorkspaceRecord } from "./api/types";
+import type { BranchRecord, CodePinionUser, CommentRecord, EpicRecord, GitStatusRecord, GoalRecord, RepoPullRequest, RepositoryRecord, SprintRecord, TaskRecord, WorkspaceRecord } from "./api/types";
 import { SessionStore } from "./auth/sessionStore";
 import { detectLocalRepo, type LocalRepoContext } from "./bridge/git";
 import { RepoLinkStore } from "./bridge/repoLinkStore";
 import { scoreRepositoriesForLocalRepo } from "./bridge/repoMatcher";
 import { CodePinionDashboardPanel, type DashboardAction } from "./dashboard/panel";
+import { getRepositoryOwnerLabel, groupRepositoriesByOwner, type RepositoryOwnerGroup } from "./repos/catalog";
 import { StatusBarController } from "./status/statusBarController";
 import { CodePinionTerminal } from "./terminal/codepinionTerminal";
 import { SimpleTreeProvider, type TreeNode } from "./views/treeProvider";
@@ -21,16 +22,18 @@ type PlanningState = {
 	currentTask: TaskRecord | null;
 	currentGoals: GoalRecord[];
 	currentSprint: SprintRecord | null;
+	currentTaskComments: CommentRecord[];
 };
 
 type ExtensionSnapshot = {
 	user: CodePinionUser | null;
-	hasFrontendApiKey: boolean;
+	hasPersonalAccessToken: boolean;
 	localRepo: LocalRepoContext | null;
 	repositories: RepositoryRecord[];
 	linkedRepository: RepositoryRecord | null;
 	workspace: WorkspaceRecord | null;
 	workspaceBranches: BranchRecord[];
+	workspaceGitStatus: GitStatusRecord | null;
 	planning: PlanningState | null;
 	generatedAiPrompt: string | null;
 	errorMessage: string | null;
@@ -51,12 +54,13 @@ class CodePinionExtensionController implements vscode.Disposable {
 	private dashboardChatHistory: Array<{ role: "user" | "assistant"; content: string }> = [];
 	private snapshot: ExtensionSnapshot = {
 		user: null,
-		hasFrontendApiKey: false,
+		hasPersonalAccessToken: false,
 		localRepo: null,
 		repositories: [],
 		linkedRepository: null,
 		workspace: null,
 		workspaceBranches: [],
+		workspaceGitStatus: null,
 		planning: null,
 		generatedAiPrompt: null,
 		errorMessage: null,
@@ -85,8 +89,16 @@ class CodePinionExtensionController implements vscode.Disposable {
 			vscode.window.registerTreeDataProvider("codepinion.ai", this.aiProvider),
 			vscode.commands.registerCommand("codepinion.login", () => this.login()),
 			vscode.commands.registerCommand("codepinion.logout", () => this.logout()),
-			vscode.commands.registerCommand("codepinion.setFrontendApiKey", () => this.setFrontendApiKey()),
+			vscode.commands.registerCommand("codepinion.setPersonalAccessToken", () => this.setPersonalAccessToken()),
 			vscode.commands.registerCommand("codepinion.linkCurrentRepo", () => this.linkCurrentRepo()),
+			vscode.commands.registerCommand("codepinion.selectRepository", () => this.selectRepository()),
+			vscode.commands.registerCommand("codepinion.searchRepositories", () => this.selectRepository()),
+			vscode.commands.registerCommand("codepinion.selectRepositoryById", (repositoryId?: number) => {
+				if (typeof repositoryId === "number") {
+					return this.selectRepositoryById(repositoryId);
+				}
+				return undefined;
+			}),
 			vscode.commands.registerCommand("codepinion.startWorkspace", () => this.startWorkspace()),
 			vscode.commands.registerCommand("codepinion.openWorkspaceTerminal", () => this.openWorkspaceTerminal()),
 			vscode.commands.registerCommand("codepinion.openCurrentTask", () => this.openCurrentTask()),
@@ -116,28 +128,14 @@ class CodePinionExtensionController implements vscode.Disposable {
 	}
 
 	private async login(): Promise<void> {
-		const frontendApiKey = await this.ensureFrontendApiKey();
-		if (!frontendApiKey) {
-			return;
-		}
-
-		const email = await vscode.window.showInputBox({
-			prompt: "CodePinion account email",
-			ignoreFocusOut: true,
-			placeHolder: "you@example.com",
-			validateInput: (value) => value.trim() ? undefined : "Email is required.",
-		});
-		if (!email) {
-			return;
-		}
-
-		const password = await vscode.window.showInputBox({
-			prompt: "CodePinion password",
+		const personalAccessToken = await vscode.window.showInputBox({
+			prompt: "CodePinion personal access token",
 			ignoreFocusOut: true,
 			password: true,
-			validateInput: (value) => value.trim() ? undefined : "Password is required.",
+			placeHolder: "cp_pat_...",
+			validateInput: (value) => value.trim() ? undefined : "A personal access token is required.",
 		});
-		if (!password) {
+		if (!personalAccessToken) {
 			return;
 		}
 
@@ -148,7 +146,7 @@ class CodePinionExtensionController implements vscode.Disposable {
 			},
 			async () => {
 				try {
-					const user = await this.client.login(email.trim(), password, frontendApiKey.trim());
+					const user = await this.client.authenticateWithPersonalAccessToken(personalAccessToken.trim());
 					vscode.window.showInformationMessage(`Signed in to CodePinion as ${user.email}.`);
 					await this.refresh();
 				} catch (error) {
@@ -173,45 +171,27 @@ class CodePinionExtensionController implements vscode.Disposable {
 		this.dashboardPanel.show(this.buildDashboardSnapshot());
 	}
 
-	private async setFrontendApiKey(): Promise<void> {
-		const currentValue = await this.sessionStore.getFrontendApiKey();
-		const frontendApiKey = await vscode.window.showInputBox({
-			prompt: "CodePinion frontend API key",
+	private async setPersonalAccessToken(): Promise<void> {
+		const currentValue = await this.sessionStore.getSessionSecrets();
+		const personalAccessToken = await vscode.window.showInputBox({
+			prompt: "CodePinion personal access token",
 			ignoreFocusOut: true,
 			password: true,
-			placeHolder: "cp_frontend_...",
-			value: currentValue ?? "",
-			validateInput: (value) => value.trim() ? undefined : "A frontend API key is required.",
+			placeHolder: "cp_pat_...",
+			value: currentValue?.authMode === "personalAccessToken" ? currentValue.personalAccessToken : "",
+			validateInput: (value) => value.trim() ? undefined : "A personal access token is required.",
 		});
-		if (!frontendApiKey) {
+		if (!personalAccessToken) {
 			return;
 		}
 
-		await this.sessionStore.storeFrontendApiKey(frontendApiKey.trim());
-		vscode.window.showInformationMessage("Saved the CodePinion frontend API key for this VS Code profile.");
-		await this.refresh();
-	}
-
-	private async ensureFrontendApiKey(): Promise<string | null> {
-		const storedKey = await this.sessionStore.getFrontendApiKey();
-		if (storedKey?.trim()) {
-			return storedKey.trim();
+		try {
+			const user = await this.client.authenticateWithPersonalAccessToken(personalAccessToken.trim());
+			vscode.window.showInformationMessage(`Saved the CodePinion personal access token for ${user.email}.`);
+			await this.refresh();
+		} catch (error) {
+			this.handleError(error, "Could not validate the CodePinion personal access token.");
 		}
-
-		const frontendApiKey = await vscode.window.showInputBox({
-			prompt: "CodePinion frontend API key",
-			ignoreFocusOut: true,
-			password: true,
-			placeHolder: "cp_frontend_...",
-			validateInput: (value) => value.trim() ? undefined : "A frontend API key is required.",
-		});
-		if (!frontendApiKey) {
-			return null;
-		}
-
-		const normalizedKey = frontendApiKey.trim();
-		await this.sessionStore.storeFrontendApiKey(normalizedKey);
-		return normalizedKey;
 	}
 
 	private async linkCurrentRepo(): Promise<void> {
@@ -264,17 +244,69 @@ class CodePinionExtensionController implements vscode.Disposable {
 		}
 
 		await this.repoLinkStore.saveLink(localRepo, selected.repository);
+		await this.repoLinkStore.saveSelectedRepository(selected.repository);
 		vscode.window.showInformationMessage(`Linked ${localRepo.workspaceFolder.name} to ${selected.repository.full_name}.`);
 		await this.refresh();
 	}
 
-	private async startWorkspace(): Promise<void> {
-		const linkedRepository = this.snapshot.linkedRepository;
-		const localRepo = this.snapshot.localRepo;
-		if (!(await this.ensureLinkedRepo(linkedRepository, localRepo))) {
+	private async selectRepository(): Promise<void> {
+		if (!(await this.ensureSignedIn())) {
 			return;
 		}
-		if (!linkedRepository || !localRepo) {
+
+		const repositories = await this.ensureRepositoryCatalog();
+		if (repositories.length === 0) {
+			vscode.window.showErrorMessage("No accessible CodePinion repositories were found for this account.");
+			return;
+		}
+
+		const grouped = groupRepositoriesByOwner(repositories);
+		const items: Array<(vscode.QuickPickItem & { repository?: RepositoryRecord }) | vscode.QuickPickItem> = [];
+		const pushOwnerGroups = (title: string, groups: ReturnType<typeof groupRepositoriesByOwner>[keyof ReturnType<typeof groupRepositoriesByOwner>]) => {
+			if (groups.length === 0) {
+				return;
+			}
+			items.push({ label: title, kind: vscode.QuickPickItemKind.Separator });
+			for (const group of groups) {
+				items.push({ label: group.ownerLabel, kind: vscode.QuickPickItemKind.Separator });
+				for (const repository of group.repositories) {
+					items.push({
+						label: repository.full_name,
+						description: repository.description || repository.language || repository.status,
+						detail: [
+							repository.visibility,
+							repository.status,
+							`default: ${repository.default_branch}`,
+						].join(" • "),
+						repository,
+					});
+				}
+			}
+		};
+
+		pushOwnerGroups("Personal", grouped.personal);
+		pushOwnerGroups("Organizations", grouped.organization);
+
+		const selected = await vscode.window.showQuickPick(items, {
+			title: "Select CodePinion repository",
+			ignoreFocusOut: true,
+			matchOnDescription: true,
+			matchOnDetail: true,
+		});
+
+		if (!selected || !("repository" in selected) || !selected.repository) {
+			return;
+		}
+
+		await this.selectRepositoryById(selected.repository.id);
+	}
+
+	private async startWorkspace(): Promise<void> {
+		const linkedRepository = this.snapshot.linkedRepository;
+		if (!(await this.ensureSelectedRepository(linkedRepository))) {
+			return;
+		}
+		if (!linkedRepository) {
 			return;
 		}
 
@@ -287,9 +319,9 @@ class CodePinionExtensionController implements vscode.Disposable {
 				try {
 					const workspace = await this.client.createOrResumeWorkspace(
 						linkedRepository.id,
-						localRepo.branchName || linkedRepository.default_branch,
+						this.resolveWorkspaceBranch(linkedRepository),
 					);
-					await this.repoLinkStore.updateWorkspaceId(localRepo, workspace.id);
+					await this.persistWorkspaceReference(linkedRepository.id, workspace.id);
 					vscode.window.showInformationMessage(
 						`Workspace #${workspace.id} is ${workspace.status} on ${workspace.branch_name}.`,
 					);
@@ -304,11 +336,10 @@ class CodePinionExtensionController implements vscode.Disposable {
 	private async openWorkspaceTerminal(): Promise<void> {
 		const workspace = this.snapshot.workspace;
 		const linkedRepository = this.snapshot.linkedRepository;
-		const localRepo = this.snapshot.localRepo;
-		if (!(await this.ensureLinkedRepo(linkedRepository, localRepo))) {
+		if (!(await this.ensureSelectedRepository(linkedRepository))) {
 			return;
 		}
-		if (!linkedRepository || !localRepo) {
+		if (!linkedRepository) {
 			return;
 		}
 
@@ -330,10 +361,10 @@ class CodePinionExtensionController implements vscode.Disposable {
 			pty: new CodePinionTerminal({
 				client: this.client,
 				workspaceId: activeWorkspace.id,
-					workspaceLabel: linkedRepository.full_name,
-					backendUrl: this.readConfiguredBackendUrl(),
-				accessToken: session.accessToken,
-				frontendApiKey: session.frontendApiKey,
+				workspaceLabel: linkedRepository.full_name,
+				backendUrl: this.readConfiguredBackendUrl(),
+				authToken: session.authToken,
+				frontendApiKey: session.authMode === "browserSession" ? session.frontendApiKey : undefined,
 			}),
 		});
 		terminal.show();
@@ -401,15 +432,18 @@ class CodePinionExtensionController implements vscode.Disposable {
 	private async refresh(): Promise<void> {
 		const localRepo = await detectLocalRepo();
 		const user = this.sessionStore.getStoredUser();
+		const selectedRepositoryId = this.repoLinkStore.getSelectedRepositoryId();
+		const localLink = localRepo ? this.repoLinkStore.getLink(localRepo) : null;
 
 		const nextSnapshot: ExtensionSnapshot = {
 			user,
-			hasFrontendApiKey: Boolean(await this.sessionStore.getFrontendApiKey()),
+			hasPersonalAccessToken: (await this.sessionStore.getSessionSecrets())?.authMode === "personalAccessToken",
 			localRepo,
 			repositories: [],
 			linkedRepository: null,
 			workspace: null,
 			workspaceBranches: [],
+			workspaceGitStatus: null,
 			planning: null,
 			generatedAiPrompt: this.dashboardGeneratedAiPrompt,
 			errorMessage: null,
@@ -425,17 +459,26 @@ class CodePinionExtensionController implements vscode.Disposable {
 			}
 		}
 
-		if (localRepo && nextSnapshot.repositories.length > 0) {
-			const link = this.repoLinkStore.getLink(localRepo);
-			nextSnapshot.linkedRepository = link
-				? nextSnapshot.repositories.find((repository) => repository.id === link.repositoryId) ?? null
+		if (nextSnapshot.repositories.length > 0) {
+			const activeRepositoryId = selectedRepositoryId ?? localLink?.repositoryId ?? null;
+			nextSnapshot.linkedRepository = activeRepositoryId
+				? nextSnapshot.repositories.find((repository) => repository.id === activeRepositoryId) ?? null
 				: null;
 
-			if (nextSnapshot.linkedRepository && link?.workspaceId) {
+			const workspaceId = nextSnapshot.linkedRepository
+				? (localLink?.repositoryId === nextSnapshot.linkedRepository.id ? localLink.workspaceId : undefined)
+					?? this.repoLinkStore.getRepositoryWorkspaceId(nextSnapshot.linkedRepository.id)
+				: null;
+
+			if (nextSnapshot.linkedRepository && workspaceId) {
 				try {
-					nextSnapshot.workspace = await this.client.getWorkspace(link.workspaceId);
+					nextSnapshot.workspace = await this.client.getWorkspace(workspaceId);
 					if (nextSnapshot.workspace?.status === "ready" || nextSnapshot.workspace?.status === "idle") {
-						nextSnapshot.workspaceBranches = await this.client.listWorkspaceBranches(nextSnapshot.workspace.id).catch(() => []);
+						const wsId = nextSnapshot.workspace.id;
+						[nextSnapshot.workspaceBranches, nextSnapshot.workspaceGitStatus] = await Promise.all([
+							this.client.listWorkspaceBranches(wsId).catch(() => []),
+							this.client.getWorkspaceGitStatus(wsId).catch(() => null),
+						]);
 					}
 				} catch (error) {
 					if (!(error instanceof CodePinionApiError && error.status === 404)) {
@@ -446,7 +489,10 @@ class CodePinionExtensionController implements vscode.Disposable {
 
 			if (nextSnapshot.linkedRepository) {
 				try {
-					nextSnapshot.planning = await this.loadPlanningState(nextSnapshot.linkedRepository, localRepo.branchName);
+					nextSnapshot.planning = await this.loadPlanningState(
+						nextSnapshot.linkedRepository,
+						this.resolvePlanningBranch(nextSnapshot.linkedRepository, localRepo, localLink, nextSnapshot.workspace),
+					);
 				} catch (error) {
 					if (!nextSnapshot.errorMessage) {
 						nextSnapshot.errorMessage = error instanceof Error ? error.message : "Could not load planning state.";
@@ -477,8 +523,15 @@ class CodePinionExtensionController implements vscode.Disposable {
 		]);
 		const tasksNested = await Promise.all(sprints.map((sprint) => this.client.listTasks(sprint.id)));
 		const tasks = tasksNested.flat();
-		const currentTask = tasks.find((task) => task.branch_name_snapshot === branchName) ?? null;
-		const currentGoals = currentTask ? await this.client.listGoals(currentTask.id) : [];
+		const currentTask = branchName
+			? tasks.find((task) => task.branch_name_snapshot === branchName) ?? null
+			: null;
+		const [currentGoals, currentTaskComments] = currentTask
+			? await Promise.all([
+				this.client.listGoals(currentTask.id),
+				this.client.listTaskComments(currentTask.id).catch(() => []),
+			])
+			: [[], []];
 		const currentSprint = currentTask
 			? sprints.find((sprint) => sprint.id === currentTask.sprint) ?? null
 			: sprints.find((sprint) => sprint.status === "active") ?? sprints.find((sprint) => sprint.status === "planning") ?? null;
@@ -489,16 +542,114 @@ class CodePinionExtensionController implements vscode.Disposable {
 			tasks,
 			currentTask,
 			currentGoals,
+			currentTaskComments,
 			currentSprint,
 		};
 	}
 
+	private resolvePlanningBranch(
+		repository: RepositoryRecord,
+		localRepo: LocalRepoContext | null,
+		localLink: ReturnType<RepoLinkStore["getLink"]>,
+		workspace: WorkspaceRecord | null,
+	): string {
+		if (localRepo && localLink?.repositoryId === repository.id && localRepo.branchName) {
+			return localRepo.branchName;
+		}
+		if (workspace?.repository === repository.id && workspace.branch_name) {
+			return workspace.branch_name;
+		}
+		return "";
+	}
+
+	private resolveWorkspaceBranch(repository: RepositoryRecord): string {
+		const localRepo = this.snapshot.localRepo;
+		const localLink = localRepo ? this.repoLinkStore.getLink(localRepo) : null;
+		if (localRepo && localLink?.repositoryId === repository.id && localRepo.branchName) {
+			return localRepo.branchName;
+		}
+		if (this.snapshot.workspace?.repository === repository.id && this.snapshot.workspace.branch_name) {
+			return this.snapshot.workspace.branch_name;
+		}
+		return repository.default_branch;
+	}
+
+	private async persistWorkspaceReference(repositoryId: number, workspaceId: number): Promise<void> {
+		await this.repoLinkStore.updateRepositoryWorkspaceId(repositoryId, workspaceId);
+		if (!this.snapshot.localRepo) {
+			return;
+		}
+
+		const localLink = this.repoLinkStore.getLink(this.snapshot.localRepo);
+		if (localLink?.repositoryId === repositoryId) {
+			await this.repoLinkStore.updateWorkspaceId(this.snapshot.localRepo, workspaceId);
+		}
+	}
+
+	private buildRepositorySectionNode(label: string, groups: RepositoryOwnerGroup[]): TreeNode {
+		return {
+			label,
+			description: `${groups.reduce((count, group) => count + group.repositories.length, 0)}`,
+			iconPath: new vscode.ThemeIcon("repo-clone"),
+			children: groups.length > 0
+				? groups.map((group) => this.buildRepositoryOwnerNode(group.ownerLabel, group.repositories))
+				: [leafNode("No repositories in this section.", undefined, "circle-slash")],
+		};
+	}
+
+	private buildRepositoryOwnerNode(ownerLabel: string, repositories: RepositoryRecord[]): TreeNode {
+		return {
+			label: ownerLabel,
+			description: `${repositories.length}`,
+			iconPath: new vscode.ThemeIcon("account"),
+			children: repositories.map((repository) => ({
+				label: repository.name,
+				description: repository.language || repository.status,
+				tooltip: [
+					repository.full_name,
+					repository.description || "No description.",
+					`Visibility: ${repository.visibility}`,
+					`Default branch: ${repository.default_branch}`,
+				].join("\n"),
+				iconPath: new vscode.ThemeIcon(this.snapshot.linkedRepository?.id === repository.id ? "check" : "repo"),
+				command: {
+					command: "codepinion.selectRepositoryById",
+					title: "Select repository",
+					arguments: [repository.id],
+				},
+			})),
+		};
+	}
+
+	private async ensureRepositoryCatalog(): Promise<RepositoryRecord[]> {
+		if (this.snapshot.repositories.length > 0) {
+			return this.snapshot.repositories;
+		}
+
+		try {
+			const repositories = await this.client.listRepositories();
+			this.snapshot = {
+				...this.snapshot,
+				repositories,
+			};
+			this.reposProvider.refresh();
+			this.dashboardPanel.update(this.buildDashboardSnapshot());
+			return repositories;
+		} catch (error) {
+			this.handleError(error, "Could not load CodePinion repositories.");
+			return [];
+		}
+	}
+
 	private buildReposNodes(): TreeNode[] {
-		const nodes: TreeNode[] = [actionNode("Open Dashboard", "codepinion.openDashboard", "dashboard")];
+		const nodes: TreeNode[] = [
+			actionNode("Open Dashboard", "codepinion.openDashboard", "dashboard"),
+			actionNode("Select Repository", "codepinion.selectRepository", "search"),
+		];
 
 		if (!this.snapshot.user) {
 			nodes.push(actionNode("Sign in to CodePinion", "codepinion.login", "account"));
-			nodes.push(actionNode("Set Frontend API Key", "codepinion.setFrontendApiKey", "key"));
+			nodes.push(actionNode("Set Personal Access Token", "codepinion.setPersonalAccessToken", "key"));
 			return nodes;
 		}
 
@@ -519,26 +670,32 @@ class CodePinionExtensionController implements vscode.Disposable {
 
 		if (this.snapshot.linkedRepository) {
 			nodes.push({
-				label: "Linked Repo",
+				label: "Selected Repo",
 				description: this.snapshot.linkedRepository.full_name,
-				iconPath: new vscode.ThemeIcon("plug"),
+				iconPath: new vscode.ThemeIcon("repo"),
 				children: [
+					leafNode("Owner", getRepositoryOwnerLabel(this.snapshot.linkedRepository), "account"),
 					leafNode("Visibility", this.snapshot.linkedRepository.visibility, "eye"),
 					leafNode("Default branch", this.snapshot.linkedRepository.default_branch, "git-branch"),
 				],
 			});
-		} else if (this.snapshot.localRepo) {
-			nodes.push(actionNode("Link current repo", "codepinion.linkCurrentRepo", "plug"));
+		} else {
+			nodes.push(actionNode("Choose a repository to activate", "codepinion.selectRepository", "repo"));
+		}
+
+		if (this.snapshot.localRepo) {
+			const localLink = this.repoLinkStore.getLink(this.snapshot.localRepo);
+			if (!localLink) {
+				nodes.push(actionNode("Link current local repo", "codepinion.linkCurrentRepo", "plug"));
+			} else if (this.snapshot.linkedRepository && localLink.repositoryId !== this.snapshot.linkedRepository.id) {
+				nodes.push(actionNode("Link current local repo to selected repo", "codepinion.linkCurrentRepo", "plug"));
+			}
 		}
 
 		if (this.snapshot.repositories.length > 0) {
-			nodes.push({
-				label: "Accessible Repos",
-				description: `${this.snapshot.repositories.length}`,
-				iconPath: new vscode.ThemeIcon("repo-clone"),
-				children: this.snapshot.repositories.slice(0, 8).map((repository) =>
-					leafNode(repository.full_name, repository.description || repository.language || repository.status, "repo")),
-			});
+			const grouped = groupRepositoriesByOwner(this.snapshot.repositories);
+			nodes.push(this.buildRepositorySectionNode("Personal Repositories", grouped.personal));
+			nodes.push(this.buildRepositorySectionNode("Organization Repositories", grouped.organization));
 		}
 
 		return withErrorNode(nodes, this.snapshot.errorMessage);
@@ -551,7 +708,7 @@ class CodePinionExtensionController implements vscode.Disposable {
 			return nodes;
 		}
 		if (!this.snapshot.linkedRepository) {
-			nodes.push(actionNode("Link the current repo first", "codepinion.linkCurrentRepo", "plug"));
+			nodes.push(actionNode("Select a repository first", "codepinion.selectRepository", "repo"));
 			return nodes;
 		}
 
@@ -583,7 +740,7 @@ class CodePinionExtensionController implements vscode.Disposable {
 			return [dashboardNode, actionNode("Sign in to load planning", "codepinion.login", "account")];
 		}
 		if (!this.snapshot.linkedRepository) {
-			return [dashboardNode, actionNode("Link the current repo first", "codepinion.linkCurrentRepo", "plug")];
+			return [dashboardNode, actionNode("Select a repository first", "codepinion.selectRepository", "repo")];
 		}
 		if (!planning) {
 			return withErrorNode([dashboardNode, leafNode("Planning context is not available yet.", undefined, "clock")], this.snapshot.errorMessage);
@@ -637,7 +794,7 @@ class CodePinionExtensionController implements vscode.Disposable {
 	private buildAiNodes(): TreeNode[] {
 		const nodes: TreeNode[] = [
 			actionNode("Open Dashboard", "codepinion.openDashboard", "dashboard"),
-			actionNode("Set Frontend API Key", "codepinion.setFrontendApiKey", "key"),
+			actionNode("Set Personal Access Token", "codepinion.setPersonalAccessToken", "key"),
 			actionNode("Ask AI About Current File", "codepinion.askAiAboutCurrentFile", "sparkle"),
 			actionNode("Generate Daily Standup", "codepinion.generateStandup", "comment-discussion"),
 			actionNode("AI Sprint Breakdown", "codepinion.sprintBreakdown", "layers"),
@@ -660,26 +817,19 @@ class CodePinionExtensionController implements vscode.Disposable {
 
 	private async ensureSignedIn(): Promise<boolean> {
 		const session = await this.sessionStore.getSessionSecrets();
-		if (session?.accessToken) {
+		if (session?.authToken) {
 			return true;
 		}
 		vscode.window.showErrorMessage("Sign in to CodePinion first.");
 		return false;
 	}
 
-	private async ensureLinkedRepo(
-		linkedRepository: RepositoryRecord | null,
-		localRepo: LocalRepoContext | null,
-	): Promise<boolean> {
+	private async ensureSelectedRepository(linkedRepository: RepositoryRecord | null): Promise<boolean> {
 		if (!(await this.ensureSignedIn())) {
 			return false;
 		}
-		if (!localRepo) {
-			vscode.window.showErrorMessage("Open a local git repository in VS Code first.");
-			return false;
-		}
 		if (!linkedRepository) {
-			vscode.window.showErrorMessage("Link the current repo to CodePinion first.");
+			vscode.window.showErrorMessage("Select a CodePinion repository first.");
 			return false;
 		}
 		return true;
@@ -687,17 +837,16 @@ class CodePinionExtensionController implements vscode.Disposable {
 
 	private async startWorkspaceAndReturn(): Promise<WorkspaceRecord | null> {
 		const linkedRepository = this.snapshot.linkedRepository;
-		const localRepo = this.snapshot.localRepo;
-		if (!(await this.ensureLinkedRepo(linkedRepository, localRepo))) {
+		if (!(await this.ensureSelectedRepository(linkedRepository))) {
 			return null;
 		}
-		if (!linkedRepository || !localRepo) {
+		if (!linkedRepository) {
 			return null;
 		}
 
 		try {
-			const workspace = await this.client.createOrResumeWorkspace(linkedRepository.id, localRepo.branchName || linkedRepository.default_branch);
-			await this.repoLinkStore.updateWorkspaceId(localRepo, workspace.id);
+			const workspace = await this.client.createOrResumeWorkspace(linkedRepository.id, this.resolveWorkspaceBranch(linkedRepository));
+			await this.persistWorkspaceReference(linkedRepository.id, workspace.id);
 			await this.refresh();
 			return workspace;
 		} catch (error) {
@@ -706,25 +855,20 @@ class CodePinionExtensionController implements vscode.Disposable {
 		}
 	}
 
-	private async linkRepositoryById(repositoryId: number): Promise<void> {
+	private async selectRepositoryById(repositoryId: number): Promise<void> {
 		if (!(await this.ensureSignedIn())) {
 			return;
 		}
 
-		const localRepo = this.snapshot.localRepo ?? await detectLocalRepo();
-		if (!localRepo) {
-			vscode.window.showErrorMessage("Open a local git repository in VS Code first.");
-			return;
-		}
-
-		const repository = this.snapshot.repositories.find((candidate) => candidate.id === repositoryId);
+		const repositories = await this.ensureRepositoryCatalog();
+		const repository = repositories.find((candidate) => candidate.id === repositoryId);
 		if (!repository) {
 			vscode.window.showErrorMessage("That CodePinion repository is not available in the current session.");
 			return;
 		}
 
-		await this.repoLinkStore.saveLink(localRepo, repository);
-		vscode.window.showInformationMessage(`Linked ${localRepo.workspaceFolder.name} to ${repository.full_name}.`);
+		await this.repoLinkStore.saveSelectedRepository(repository);
+		vscode.window.showInformationMessage(`Selected ${repository.full_name} for CodePinion.`);
 		await this.refresh();
 	}
 
@@ -755,7 +899,7 @@ class CodePinionExtensionController implements vscode.Disposable {
 
 	private async createSprintFromDashboard(payload: Record<string, unknown>): Promise<void> {
 		const repository = this.snapshot.linkedRepository;
-		if (!(await this.ensureLinkedRepo(repository, this.snapshot.localRepo)) || !repository) {
+		if (!(await this.ensureSelectedRepository(repository)) || !repository) {
 			return;
 		}
 
@@ -783,7 +927,7 @@ class CodePinionExtensionController implements vscode.Disposable {
 
 	private async createTaskFromDashboard(payload: Record<string, unknown>): Promise<void> {
 		const repository = this.snapshot.linkedRepository;
-		if (!(await this.ensureLinkedRepo(repository, this.snapshot.localRepo)) || !repository) {
+		if (!(await this.ensureSelectedRepository(repository)) || !repository) {
 			return;
 		}
 
@@ -812,7 +956,10 @@ class CodePinionExtensionController implements vscode.Disposable {
 			description: readString(payload, "description") ?? "",
 			status: readString(payload, "status") ?? "backlog",
 			priority: readString(payload, "priority") ?? "medium",
-			branch_name_snapshot: readString(payload, "branchName") ?? this.snapshot.localRepo?.branchName ?? "",
+			branch_name_snapshot: readString(payload, "branchName")
+				?? this.snapshot.localRepo?.branchName
+				?? this.snapshot.workspace?.branch_name
+				?? repository.default_branch,
 			due_date: readString(payload, "dueDate") || null,
 			codebase_area: readString(payload, "codebaseArea") ?? "",
 			story_points: readNumber(payload, "storyPoints") ?? 0,
@@ -825,7 +972,7 @@ class CodePinionExtensionController implements vscode.Disposable {
 
 	private async createGoalFromDashboard(payload: Record<string, unknown>): Promise<void> {
 		const repository = this.snapshot.linkedRepository;
-		if (!(await this.ensureLinkedRepo(repository, this.snapshot.localRepo)) || !repository) {
+		if (!(await this.ensureSelectedRepository(repository)) || !repository) {
 			return;
 		}
 
@@ -900,7 +1047,7 @@ class CodePinionExtensionController implements vscode.Disposable {
 
 	private async createEpicFromDashboard(payload: Record<string, unknown>): Promise<void> {
 		const repository = this.snapshot.linkedRepository;
-		if (!(await this.ensureLinkedRepo(repository, this.snapshot.localRepo)) || !repository) {
+		if (!(await this.ensureSelectedRepository(repository)) || !repository) {
 			return;
 		}
 
@@ -940,15 +1087,151 @@ class CodePinionExtensionController implements vscode.Disposable {
 		await this.refresh();
 	}
 
+	private async deleteSprintFromDashboard(sprintId: number): Promise<void> {
+		const confirm = await vscode.window.showWarningMessage(
+			"Delete this sprint? Its tasks will become unassigned.",
+			{ modal: true },
+			"Delete",
+		);
+		if (confirm !== "Delete") { return; }
+		await this.client.deleteSprint(sprintId);
+		vscode.window.showInformationMessage("Sprint deleted.");
+		await this.refresh();
+	}
+
+	private async deleteTaskFromDashboard(taskId: number): Promise<void> {
+		const confirm = await vscode.window.showWarningMessage(
+			"Delete this task?",
+			{ modal: true },
+			"Delete",
+		);
+		if (confirm !== "Delete") { return; }
+		await this.client.deleteTask(taskId);
+		vscode.window.showInformationMessage("Task deleted.");
+		await this.refresh();
+	}
+
+	private async deleteGoalFromDashboard(goalId: number): Promise<void> {
+		const confirm = await vscode.window.showWarningMessage(
+			"Delete this goal?",
+			{ modal: true },
+			"Delete",
+		);
+		if (confirm !== "Delete") { return; }
+		await this.client.deleteGoal(goalId);
+		vscode.window.showInformationMessage("Goal deleted.");
+		await this.refresh();
+	}
+
+	private async deleteEpicFromDashboard(epicId: number): Promise<void> {
+		const confirm = await vscode.window.showWarningMessage(
+			"Delete this epic?",
+			{ modal: true },
+			"Delete",
+		);
+		if (confirm !== "Delete") { return; }
+		await this.client.deleteEpic(epicId);
+		vscode.window.showInformationMessage("Epic deleted.");
+		await this.refresh();
+	}
+
+	private async workspaceCommitFromDashboard(payload: Record<string, unknown>): Promise<void> {
+		const workspace = this.snapshot.workspace;
+		if (!workspace) {
+			vscode.window.showErrorMessage("No active workspace.");
+			return;
+		}
+		const message = readString(payload, "message");
+		if (!message) {
+			vscode.window.showErrorMessage("Commit message is required.");
+			return;
+		}
+		const result = await this.client.workspaceGitCommit(workspace.id, message);
+		vscode.window.showInformationMessage(`Committed: ${result.sha.slice(0, 7)} — ${result.message}`);
+		await this.refresh();
+	}
+
+	private async workspaceCheckoutFromDashboard(): Promise<void> {
+		const workspace = this.snapshot.workspace;
+		if (!workspace) {
+			vscode.window.showErrorMessage("No active workspace.");
+			return;
+		}
+		const branches = this.snapshot.workspaceBranches.map((b) => b.name);
+		if (branches.length === 0) {
+			vscode.window.showErrorMessage("No branches available.");
+			return;
+		}
+		const picked = await vscode.window.showQuickPick(branches, { placeHolder: "Select branch to checkout" });
+		if (!picked) { return; }
+		await this.client.workspaceGitCheckout(workspace.id, picked);
+		vscode.window.showInformationMessage(`Checked out ${picked}.`);
+		await this.refresh();
+	}
+
+	private async workspaceCreateBranchFromDashboard(): Promise<void> {
+		const workspace = this.snapshot.workspace;
+		if (!workspace) {
+			vscode.window.showErrorMessage("No active workspace.");
+			return;
+		}
+		const name = await vscode.window.showInputBox({ prompt: "New branch name", placeHolder: "feat/my-feature" });
+		if (!name?.trim()) { return; }
+		await this.client.workspaceGitCreateBranch(workspace.id, name.trim());
+		vscode.window.showInformationMessage(`Created branch ${name.trim()}.`);
+		await this.refresh();
+	}
+
+	private async postTaskCommentFromDashboard(taskId: number, payload: Record<string, unknown>): Promise<void> {
+		const body = readString(payload, "body");
+		if (!body) {
+			vscode.window.showErrorMessage("Comment body is required.");
+			return;
+		}
+		await this.client.createTaskComment(taskId, body);
+		await this.refresh();
+	}
+
+	private async postGoalCommentFromDashboard(goalId: number, payload: Record<string, unknown>): Promise<void> {
+		const body = readString(payload, "body");
+		if (!body) {
+			vscode.window.showErrorMessage("Comment body is required.");
+			return;
+		}
+		await this.client.createGoalComment(goalId, body);
+		await this.refresh();
+	}
+
+	private async linkPrToTaskFromDashboard(taskId: number): Promise<void> {
+		const repository = this.snapshot.linkedRepository;
+		if (!repository) {
+			vscode.window.showErrorMessage("Select a repository first.");
+			return;
+		}
+		const prs = await this.client.listRepoPullRequests(repository.id);
+		if (prs.length === 0) {
+			vscode.window.showInformationMessage("No open pull requests found for this repository.");
+			return;
+		}
+		const items = prs.map((pr: RepoPullRequest) => ({
+			label: `#${pr.number} ${pr.title}`,
+			description: pr.source_branch,
+			prId: pr.id,
+		}));
+		const picked = await vscode.window.showQuickPick(items, { placeHolder: "Select a pull request to link" });
+		if (!picked) { return; }
+		await this.client.linkPrToTask(taskId, picked.prId);
+		vscode.window.showInformationMessage(`Linked PR #${picked.label} to task.`);
+		await this.refresh();
+	}
+
 	private async startTaskWorkById(taskId: number): Promise<void> {
-		if (!(await this.ensureLinkedRepo(this.snapshot.linkedRepository, this.snapshot.localRepo))) {
+		if (!(await this.ensureSelectedRepository(this.snapshot.linkedRepository))) {
 			return;
 		}
 
 		const response = await this.client.startTaskWork(taskId);
-		if (this.snapshot.localRepo) {
-			await this.repoLinkStore.updateWorkspaceId(this.snapshot.localRepo, response.workspace.id);
-		}
+		await this.persistWorkspaceReference(response.task.repository, response.workspace.id);
 		vscode.window.showInformationMessage(
 			`Started work on ${response.task.title} using branch ${response.branch_name}. Workspace #${response.workspace.id} is ${response.workspace.status}.`,
 		);
@@ -1032,7 +1315,7 @@ class CodePinionExtensionController implements vscode.Disposable {
 	private async generateStandup(): Promise<void> {
 		const planning = this.snapshot.planning;
 		if (!planning) {
-			vscode.window.showErrorMessage("Load a linked repository with planning data first.");
+			vscode.window.showErrorMessage("Load a selected repository with planning data first.");
 			return;
 		}
 
@@ -1228,11 +1511,11 @@ class CodePinionExtensionController implements vscode.Disposable {
 	}
 
 	private readConfiguredBackendUrl(): string {
-		return vscode.workspace.getConfiguration("codepinion").get<string>("backendUrl", "http://127.0.0.1:8000");
+		return vscode.workspace.getConfiguration("codepinion").get<string>("backendUrl", "https://api-uat.codepinion.co.ke");
 	}
 
 	private readConfiguredAppUrl(): string {
-		return vscode.workspace.getConfiguration("codepinion").get<string>("appUrl", "http://localhost:3000");
+		return vscode.workspace.getConfiguration("codepinion").get<string>("appUrl", "https://playground.codepinion.co.ke");
 	}
 
 	private async handleDashboardAction(action: DashboardAction): Promise<void> {
@@ -1247,7 +1530,7 @@ class CodePinionExtensionController implements vscode.Disposable {
 				return;
 			}
 			if (action.command === "codepinion.linkRepository" && typeof action.repositoryId === "number") {
-				await this.linkRepositoryById(action.repositoryId);
+				await this.selectRepositoryById(action.repositoryId);
 				return;
 			}
 			if (action.command === "codepinion.openTaskById" && typeof action.taskId === "number") {
@@ -1313,6 +1596,46 @@ class CodePinionExtensionController implements vscode.Disposable {
 			}
 			if (action.command === "codepinion.dashboard.clearChat") {
 				this.clearDashboardChat();
+				return;
+			}
+			if (action.command === "codepinion.dashboard.deleteSprint" && typeof action.sprintId === "number") {
+				await this.deleteSprintFromDashboard(action.sprintId);
+				return;
+			}
+			if (action.command === "codepinion.dashboard.deleteTask" && typeof action.taskId === "number") {
+				await this.deleteTaskFromDashboard(action.taskId);
+				return;
+			}
+			if (action.command === "codepinion.dashboard.deleteGoal" && typeof action.goalId === "number") {
+				await this.deleteGoalFromDashboard(action.goalId);
+				return;
+			}
+			if (action.command === "codepinion.dashboard.deleteEpic" && typeof action.epicId === "number") {
+				await this.deleteEpicFromDashboard(action.epicId);
+				return;
+			}
+			if (action.command === "codepinion.dashboard.workspaceCommit") {
+				await this.workspaceCommitFromDashboard(action.payload ?? {});
+				return;
+			}
+			if (action.command === "codepinion.dashboard.workspaceCheckout") {
+				await this.workspaceCheckoutFromDashboard();
+				return;
+			}
+			if (action.command === "codepinion.dashboard.workspaceCreateBranch") {
+				await this.workspaceCreateBranchFromDashboard();
+				return;
+			}
+			if (action.command === "codepinion.dashboard.postTaskComment" && typeof action.taskId === "number") {
+				await this.postTaskCommentFromDashboard(action.taskId, action.payload ?? {});
+				return;
+			}
+			if (action.command === "codepinion.dashboard.postGoalComment" && typeof action.goalId === "number") {
+				await this.postGoalCommentFromDashboard(action.goalId, action.payload ?? {});
+				return;
+			}
+			if (action.command === "codepinion.dashboard.linkPrToTask" && typeof action.taskId === "number") {
+				await this.linkPrToTaskFromDashboard(action.taskId);
 				return;
 			}
 			await vscode.commands.executeCommand(action.command);

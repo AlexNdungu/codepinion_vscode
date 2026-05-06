@@ -6,6 +6,7 @@ import { buildApiUrl, normalizeListPayload, normalizeBaseUrl } from '../api/clie
 import { parseGitRemotes } from '../bridge/gitShared';
 import { normalizeRemote, scoreRepositoryForLocalRepo } from '../bridge/repoMatcher';
 import { buildDashboardHtml } from '../dashboard/html';
+import { filterRepositories, getRepositoryOwnerLabel, groupRepositoriesByOwner } from '../repos/catalog';
 import { buildTerminalSocketUrl } from '../terminal/socketUrl';
 
 test('normalizes backend URLs cleanly', () => {
@@ -74,13 +75,69 @@ test('builds terminal websocket URLs', () => {
 		'http://127.0.0.1:8000/',
 		42,
 		'session-abc',
-		'access-token',
-		'frontend-key',
+		'personal-access-token',
 	);
 
 	assert.ok(url.startsWith('ws://127.0.0.1:8000/ws/workspaces/42/terminal/sessions/session-abc/'));
-	assert.ok(url.includes('access_token=access-token'));
-	assert.ok(url.includes('api_key=frontend-key'));
+	assert.ok(url.includes('auth_token=personal-access-token'));
+	assert.ok(!url.includes('api_key='));
+});
+
+test('filters and groups repositories by backend ownership fields', () => {
+	const repositories = [
+		{
+			id: 1,
+			organization: null,
+			organization_name: null,
+			owner_user: 1,
+			owner_type: 'personal' as const,
+			owner_name: 'Alex Meta',
+			owner_slug: 'alex',
+			owner_avatar: null,
+			full_name: 'alex/codepinion',
+			can_manage: true,
+			name: 'CodePinion',
+			slug: 'codepinion',
+			description: 'Primary extension repo',
+			visibility: 'private' as const,
+			default_branch: 'main',
+			language: 'typescript',
+			status: 'active' as const,
+			created_at: '',
+			updated_at: '',
+		},
+		{
+			id: 2,
+			organization: 9,
+			organization_name: 'CodePinion Labs',
+			owner_user: null,
+			owner_type: 'organization' as const,
+			owner_name: 'CodePinion Labs',
+			owner_slug: 'codepinion-labs',
+			owner_avatar: null,
+			full_name: 'codepinion-labs/runtime-service',
+			can_manage: true,
+			name: 'Runtime Service',
+			slug: 'runtime-service',
+			description: 'Workspace backend',
+			visibility: 'team' as const,
+			default_branch: 'main',
+			language: 'python',
+			status: 'active' as const,
+			created_at: '',
+			updated_at: '',
+		},
+	];
+
+	assert.strictEqual(getRepositoryOwnerLabel(repositories[0]), 'Alex Meta');
+	assert.strictEqual(getRepositoryOwnerLabel(repositories[1]), 'CodePinion Labs');
+	assert.deepStrictEqual(filterRepositories(repositories, 'runtime').map((repository) => repository.id), [2]);
+
+	const grouped = groupRepositoriesByOwner(repositories);
+	assert.strictEqual(grouped.personal.length, 1);
+	assert.strictEqual(grouped.personal[0].ownerLabel, 'Alex Meta');
+	assert.strictEqual(grouped.organization.length, 1);
+	assert.strictEqual(grouped.organization[0].ownerLabel, 'CodePinion Labs');
 });
 
 test('builds repo-aware AI prompts', () => {
@@ -131,7 +188,7 @@ test('builds dashboard html with actionable content', () => {
 	const html = buildDashboardHtml(
 		{
 			user: null,
-			hasFrontendApiKey: false,
+			hasPersonalAccessToken: false,
 			localRepo: null,
 			repositories: [{
 				id: 1,
@@ -177,6 +234,7 @@ test('builds dashboard html with actionable content', () => {
 			},
 			workspace: null,
 			workspaceBranches: [],
+			workspaceGitStatus: null,
 			planning: {
 				epics: [],
 				sprints: [{
@@ -215,6 +273,7 @@ test('builds dashboard html with actionable content', () => {
 				}],
 				currentTask: null,
 				currentGoals: [],
+				currentTaskComments: [],
 				currentSprint: {
 					id: 3,
 					repository: 1,
@@ -232,8 +291,8 @@ test('builds dashboard html with actionable content', () => {
 			chatHistory: [],
 			generatedAiPrompt: 'Prompt body',
 			errorMessage: null,
-			backendUrl: 'http://127.0.0.1:8000',
-			appUrl: 'http://localhost:3000',
+			backendUrl: 'https://api-uat.codepinion.co.ke',
+			appUrl: 'https://playground.codepinion.co.ke',
 		},
 		{
 			cspSource: 'vscode-webview',
@@ -244,13 +303,14 @@ test('builds dashboard html with actionable content', () => {
 
 	assert.ok(html.includes('<title>CodePinion</title>'));
 	assert.ok(html.includes('codepinion.login'));
-	assert.ok(html.includes('codepinion.setFrontendApiKey'));
+	assert.ok(html.includes('codepinion.setPersonalAccessToken'));
 	assert.ok(html.includes('data-repository-id="1"'));
+	assert.ok(html.includes('data-tab="repos"'));
+	assert.ok(html.includes('Search & Select'));
 	assert.ok(html.includes('data-task-id="7"'));
 	assert.ok(html.includes('codepinion.dashboard.createSprint'));
 	assert.ok(html.includes('codepinion.dashboard.updateTaskStatus'));
 	assert.ok(html.includes('codepinion.dashboard.chatSend'));
 	assert.ok(html.includes('Start Work'));
-	assert.ok(html.includes('codepinion.setFrontendApiKey'));
-	assert.ok(html.includes('Backend: http://127.0.0.1:8000'));
+	assert.ok(html.includes('No personal access token configured'));
 });
