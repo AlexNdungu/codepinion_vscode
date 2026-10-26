@@ -48,4 +48,4 @@ async function runGitCommand(args: string[], cwd: string): Promise<string> {
 	return `${result.stdout}`.trim();
 }
 
-export { buildRepoFingerprint, parseGitRemotes };
+export { buildRepoFingerprint };
